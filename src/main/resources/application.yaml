@@ -31,6 +31,8 @@ management:
 services:
   authentication:
     url: http://localhost:8082
+  audit:
+    url: ${AUDIT_SERVICE_URL:http://localhost:8086}
 
 keycloak:
   admin:

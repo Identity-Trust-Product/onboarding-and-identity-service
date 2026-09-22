@@ -20,16 +20,19 @@ import java.util.UUID;
 public class OrganizationRegistrationService {
     private final OrganizationRepository organizationRepository;
     private final KeycloakAdminClient keycloakAdminClient;
+    private final OnboardingAuditService auditService;
     private final JavaMailSender mailSender;
     private final String mailFrom;
 
     public OrganizationRegistrationService(
             OrganizationRepository organizationRepository,
             KeycloakAdminClient keycloakAdminClient,
+            OnboardingAuditService auditService,
             JavaMailSender mailSender,
             @Value("${organization-registration.mail.from}") String mailFrom) {
         this.organizationRepository = organizationRepository;
         this.keycloakAdminClient = keycloakAdminClient;
+        this.auditService = auditService;
         this.mailSender = mailSender;
         this.mailFrom = mailFrom;
     }
@@ -40,21 +43,28 @@ public class OrganizationRegistrationService {
             ? "org_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12)
             : request.organizationId();
 
-        organizationRepository.insert(request, organizationId);
-        String adminEmail = request.officialEmail() == null || request.officialEmail().isBlank()
-                        ? request.representativeEmail()
-                        : request.officialEmail();
-        keycloakAdminClient.createOrganizationAdmin(
-            organizationId,
-                request.representativeName(),
-                adminEmail);
-        boolean credentialEmailSent = sendTemporaryPasswordEmail(adminEmail, organizationId);
+        try {
+            organizationRepository.insert(request, organizationId);
+            String adminEmail = request.officialEmail() == null || request.officialEmail().isBlank()
+                            ? request.representativeEmail()
+                            : request.officialEmail();
+            keycloakAdminClient.createOrganizationAdmin(
+                organizationId,
+                    request.representativeName(),
+                    adminEmail);
+            boolean credentialEmailSent = sendTemporaryPasswordEmail(adminEmail, organizationId);
 
-        return new RegisterOrganizationResponse(
-            organizationId,
-            organizationId,
-                "Organization registered and activated. The temporary one-time password was sent to the official email.",
-                credentialEmailSent);
+            RegisterOrganizationResponse response = new RegisterOrganizationResponse(
+                organizationId,
+                organizationId,
+                    "Organization registered and activated. The temporary one-time password was sent to the official email.",
+                    credentialEmailSent);
+            auditService.organizationRegistered(request, response);
+            return response;
+        } catch (RuntimeException exception) {
+            auditService.organizationRegistrationFailed(request, organizationId, exception);
+            throw exception;
+        }
     }
 
     public OrganizationAdminSyncResponse syncOrganizationAdmin(String organizationId) {

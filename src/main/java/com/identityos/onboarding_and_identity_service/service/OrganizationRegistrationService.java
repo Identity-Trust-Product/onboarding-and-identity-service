@@ -53,7 +53,7 @@ public class OrganizationRegistrationService {
         return new RegisterOrganizationResponse(
             organizationId,
             organizationId,
-                "Organization registered. The temporary one-time password was sent to the official email.",
+                "Organization registered and activated. The temporary one-time password was sent to the official email.",
                 credentialEmailSent);
     }
 

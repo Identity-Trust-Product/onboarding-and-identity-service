@@ -300,20 +300,24 @@ public class KeycloakAdminClient {
     }
 
     private void assignApplicationUserRole(String token, String userId) {
+        assignRealmRole(token, userId, "APPLICATION_USER", "End user registered through a third-party application");
+    }
+
+    private void assignRealmRole(String token, String userId, String roleName, String description) {
         JsonNode role;
         try {
-            role = getApplicationUserRole(token);
+            role = getRealmRole(token, roleName);
         } catch (HttpClientErrorException.NotFound exception) {
             restClient.post()
                 .uri("/admin/realms/" + targetRealm + "/roles")
                 .headers(headers -> headers.setBearerAuth(token))
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(Map.of(
-                    "name", "APPLICATION_USER",
-                    "description", "End user registered through an approved third-party application"))
+                    "name", roleName,
+                    "description", description))
                 .retrieve()
                 .toBodilessEntity();
-            role = getApplicationUserRole(token);
+            role = getRealmRole(token, roleName);
         }
         try {
             restClient.post()
@@ -328,9 +332,9 @@ public class KeycloakAdminClient {
         }
     }
 
-    private JsonNode getApplicationUserRole(String token) {
+    private JsonNode getRealmRole(String token, String roleName) {
         return restClient.get()
-                .uri("/admin/realms/" + targetRealm + "/roles/APPLICATION_USER")
+                .uri("/admin/realms/" + targetRealm + "/roles/" + roleName)
                 .headers(headers -> headers.setBearerAuth(token))
                 .retrieve()
                 .body(JsonNode.class);

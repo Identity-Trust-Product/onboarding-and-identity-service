@@ -45,7 +45,7 @@ public class OrganizationRepository {
                     registration_authority, incorporation_date, verification_id_type,
                     verification_id, verification_id_verify_status, website_url, logo_url,
                     status, approval_status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', 'PENDING')
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', 'APPROVED')
                 RETURNING id
                 """,
                 UUID.class,
@@ -213,11 +213,11 @@ public class OrganizationRepository {
                 """, UUID.class, organizationId);
         String applicationId = "app_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
 
-        return jdbcTemplate.queryForObject("""
+        jdbcTemplate.queryForObject("""
                 INSERT INTO applications (
                     entity_id, organization_id, application_id, application_name,
                     application_type, description, redirect_uri, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'INACTIVE')
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE')
                 RETURNING id, application_id, application_name, application_type, description,
                           redirect_uri, status, trust_score, created_at
                 """, (resultSet, rowNum) -> new ApplicationResponse(
@@ -241,6 +241,8 @@ public class OrganizationRepository {
                 request.applicationType(),
                 request.description(),
                 request.redirectUri());
+        ensureApplicationClient(applicationId);
+        return findApplicationByApplicationId(applicationId).orElseThrow();
     }
 
     public List<ApplicationResponse> findApplications(String organizationId) {
@@ -287,10 +289,11 @@ public class OrganizationRepository {
         return jdbcTemplate.query("""
                 SELECT a.id, o.organization_id, o.organization_name, a.application_id,
                        a.application_name, a.application_type, a.description, a.redirect_uri,
-                       a.application_id AS client_id, NULL AS client_secret,
+                       COALESCE(c.client_id, a.application_id) AS client_id, c.client_secret,
                        a.status, a.trust_score, a.created_at
                 FROM applications a
                 JOIN organizations o ON o.id = a.organization_id
+                LEFT JOIN application_clients c ON c.application_id = a.id AND c.active = TRUE
                 WHERE a.application_id = ?
                 """, resultSet -> resultSet.next()
                 ? Optional.of(applicationRowMapper().mapRow(resultSet, 0))
@@ -354,7 +357,7 @@ public class OrganizationRepository {
                 FROM identity_schema_version
                 WHERE schema_id = ?
                 """, Integer.class, schemaUuid);
-        String versionStatus = Boolean.TRUE.equals(request.submitForApproval()) ? "SUBMITTED" : "DRAFT";
+        String versionStatus = Boolean.TRUE.equals(request.submitForApproval()) ? "APPROVED" : "DRAFT";
 
         IdentitySchemaVersionResponse response = jdbcTemplate.queryForObject("""
                 INSERT INTO identity_schema_version (
@@ -385,8 +388,18 @@ public class OrganizationRepository {
         if (Boolean.TRUE.equals(request.submitForApproval())) {
             jdbcTemplate.update("""
                     INSERT INTO schema_version_approval (schema_version_id, submitted_by, status)
-                    VALUES (?, ?, 'PENDING')
+                    VALUES (?, ?, 'APPROVED')
                     """, UUID.fromString(response.versionId()), organizationUuid);
+            jdbcTemplate.update("""
+                    UPDATE identity_schema_version
+                    SET published_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """, UUID.fromString(response.versionId()));
+            jdbcTemplate.update("""
+                    UPDATE identity_schema
+                    SET active_version_id = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """, UUID.fromString(response.versionId()), schemaUuid);
         }
 
         return response;

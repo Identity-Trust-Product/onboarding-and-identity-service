@@ -134,7 +134,7 @@ public class HostedIdentityService {
         ApplicationResponse application = organizationRepository.findApplicationByClientId(clientId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Application not found."));
         if (!"ACTIVE".equalsIgnoreCase(application.status())) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Application is not approved.");
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Application is not active.");
         }
         if (redirectUri != null && !redirectUri.isBlank() && !redirectUri.equals(application.redirectUri())) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Redirect URI is not registered for this application.");

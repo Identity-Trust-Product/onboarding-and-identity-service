@@ -1,6 +1,5 @@
 package com.identityos.onboarding_and_identity_service.service;
 
-import com.identityos.onboarding_and_identity_service.client.AuditClient;
 import com.identityos.onboarding_and_identity_service.client.KeycloakAdminClient;
 import com.identityos.onboarding_and_identity_service.dto.OrganizationAdminSyncResponse;
 import com.identityos.onboarding_and_identity_service.dto.OrganizationProfileResponse;
@@ -15,28 +14,25 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
-import java.time.OffsetDateTime;
-import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.UUID;
 
 @Service
 public class OrganizationRegistrationService {
     private final OrganizationRepository organizationRepository;
     private final KeycloakAdminClient keycloakAdminClient;
-    private final AuditClient auditClient;
+    private final OnboardingAuditService auditService;
     private final JavaMailSender mailSender;
     private final String mailFrom;
 
     public OrganizationRegistrationService(
             OrganizationRepository organizationRepository,
             KeycloakAdminClient keycloakAdminClient,
-            AuditClient auditClient,
+            OnboardingAuditService auditService,
             JavaMailSender mailSender,
             @Value("${organization-registration.mail.from}") String mailFrom) {
         this.organizationRepository = organizationRepository;
         this.keycloakAdminClient = keycloakAdminClient;
-        this.auditClient = auditClient;
+        this.auditService = auditService;
         this.mailSender = mailSender;
         this.mailFrom = mailFrom;
     }
@@ -47,23 +43,28 @@ public class OrganizationRegistrationService {
             ? "org_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12)
             : request.organizationId();
 
-        organizationRepository.insert(request, organizationId);
-        String adminEmail = request.officialEmail() == null || request.officialEmail().isBlank()
-                        ? request.representativeEmail()
-                        : request.officialEmail();
-        keycloakAdminClient.createOrganizationAdmin(
-            organizationId,
-                request.representativeName(),
-                adminEmail);
-        boolean credentialEmailSent = sendTemporaryPasswordEmail(adminEmail, organizationId);
+        try {
+            organizationRepository.insert(request, organizationId);
+            String adminEmail = request.officialEmail() == null || request.officialEmail().isBlank()
+                            ? request.representativeEmail()
+                            : request.officialEmail();
+            keycloakAdminClient.createOrganizationAdmin(
+                organizationId,
+                    request.representativeName(),
+                    adminEmail);
+            boolean credentialEmailSent = sendTemporaryPasswordEmail(adminEmail, organizationId);
 
-        RegisterOrganizationResponse response = new RegisterOrganizationResponse(
-            organizationId,
-            organizationId,
-                "Organization registered. The temporary one-time password was sent to the official email.",
-                credentialEmailSent);
-        recordOrganizationRegistrationAudit(request, response);
-        return response;
+            RegisterOrganizationResponse response = new RegisterOrganizationResponse(
+                organizationId,
+                organizationId,
+                    "Organization registered. The temporary one-time password was sent to the official email.",
+                    credentialEmailSent);
+            auditService.organizationRegistered(request, response);
+            return response;
+        } catch (RuntimeException exception) {
+            auditService.organizationRegistrationFailed(request, organizationId, exception);
+            throw exception;
+        }
     }
 
     public OrganizationAdminSyncResponse syncOrganizationAdmin(String organizationId) {
@@ -105,39 +106,6 @@ public class OrganizationRegistrationService {
         } catch (RuntimeException exception) {
             System.err.println("Organization admin credential email was not sent: " + exception.getMessage());
             return false;
-        }
-    }
-
-    private void recordOrganizationRegistrationAudit(
-            RegisterOrganizationRequest request,
-            RegisterOrganizationResponse response) {
-        try {
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("organizationName", request.organizationName());
-            body.put("organizationType", request.organizationType());
-            body.put("officialEmail", request.officialEmail());
-            body.put("representativeEmail", request.representativeEmail());
-
-            Map<String, Object> metadata = new LinkedHashMap<>();
-            metadata.put("verificationEmailSent", response.verificationEmailSent());
-            metadata.put("source", "OrganizationRegistrationService.register");
-
-            auditClient.record(Map.ofEntries(
-                    Map.entry("origin", "onboarding-and-identity-service"),
-                    Map.entry("action", "ORGANIZATION_REGISTERED"),
-                    Map.entry("actorUserId", response.organizationId()),
-                    Map.entry("actorRole", "ORGANIZATION_ADMIN"),
-                    Map.entry("httpMethod", "POST"),
-                    Map.entry("endpoint", "/api/v1/onboarding/organizations"),
-                    Map.entry("entityType", "ORGANIZATION"),
-                    Map.entry("entityId", response.organizationId()),
-                    Map.entry("organizationId", response.organizationId()),
-                    Map.entry("status", "SUCCESS"),
-                    Map.entry("body", body),
-                    Map.entry("metadata", metadata),
-                    Map.entry("isoTime", OffsetDateTime.now().toString())));
-        } catch (RuntimeException exception) {
-            System.err.println("Audit event was not recorded: " + exception.getMessage());
         }
     }
 }

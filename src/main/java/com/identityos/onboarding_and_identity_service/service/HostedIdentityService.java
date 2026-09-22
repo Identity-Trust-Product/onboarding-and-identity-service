@@ -19,12 +19,15 @@ import java.util.Map;
 public class HostedIdentityService {
     private final OrganizationRepository organizationRepository;
     private final KeycloakAdminClient keycloakAdminClient;
+    private final OnboardingAuditService auditService;
 
     public HostedIdentityService(
             OrganizationRepository organizationRepository,
-            KeycloakAdminClient keycloakAdminClient) {
+            KeycloakAdminClient keycloakAdminClient,
+            OnboardingAuditService auditService) {
         this.organizationRepository = organizationRepository;
         this.keycloakAdminClient = keycloakAdminClient;
+        this.auditService = auditService;
     }
 
     public HostedIdentityAuthResponse register(HostedIdentityRegisterRequest request) {
@@ -52,7 +55,7 @@ public class HostedIdentityService {
                     application.applicationId(),
                     request.clientId(),
                     request.fields());
-            return new HostedIdentityAuthResponse(
+            HostedIdentityAuthResponse response = new HostedIdentityAuthResponse(
                     true,
                     "Registration completed successfully.",
                     externalUsername,
@@ -61,11 +64,18 @@ public class HostedIdentityService {
                     null,
                     null,
                     null);
+            auditService.hostedIdentityRegistered(
+                    application.organizationId(),
+                    application.applicationId(),
+                    request.clientId(),
+                    externalUsername,
+                    response);
+            return response;
         } catch (IllegalStateException exception) {
             if (!exception.getMessage().toLowerCase().contains("already registered")) {
                 throw new ResponseStatusException(HttpStatus.CONFLICT, exception.getMessage(), exception);
             }
-            return new HostedIdentityAuthResponse(
+            HostedIdentityAuthResponse response = new HostedIdentityAuthResponse(
                     true,
                     "Registration completed successfully.",
                     externalUsername,
@@ -74,9 +84,16 @@ public class HostedIdentityService {
                     null,
                     null,
                     null);
+            auditService.hostedIdentityRegistered(
+                    application.organizationId(),
+                    application.applicationId(),
+                    request.clientId(),
+                    externalUsername,
+                    response);
+            return response;
         } catch (RestClientResponseException exception) {
             if (exception.getStatusCode().value() == 409) {
-                return new HostedIdentityAuthResponse(
+                HostedIdentityAuthResponse response = new HostedIdentityAuthResponse(
                         true,
                         "Registration completed successfully.",
                         externalUsername,
@@ -85,6 +102,13 @@ public class HostedIdentityService {
                         null,
                         null,
                         null);
+                auditService.hostedIdentityRegistered(
+                        application.organizationId(),
+                        application.applicationId(),
+                        request.clientId(),
+                        externalUsername,
+                        response);
+                return response;
             }
             String detail = exception.getResponseBodyAsString();
             String message = detail == null || detail.isBlank()
@@ -119,7 +143,7 @@ public class HostedIdentityService {
                     : "Unable to login through Keycloak: " + detail;
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, message, exception);
         }
-        return new HostedIdentityAuthResponse(
+        HostedIdentityAuthResponse response = new HostedIdentityAuthResponse(
                 true,
                 "Login successful.",
                 externalUsername,
@@ -128,6 +152,13 @@ public class HostedIdentityService {
                 token.path("refresh_token").asText(null),
                 token.path("token_type").asText("Bearer"),
                 token.path("expires_in").isNumber() ? token.path("expires_in").asLong() : null);
+        auditService.hostedIdentityLogin(
+                application.organizationId(),
+                application.applicationId(),
+                request.clientId(),
+                externalUsername,
+                response);
+        return response;
     }
 
     private ApplicationResponse approvedApplication(String clientId, String redirectUri) {

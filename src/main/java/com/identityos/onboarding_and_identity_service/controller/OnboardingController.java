@@ -21,6 +21,7 @@ import com.identityos.onboarding_and_identity_service.dto.RegisterOrganizationRe
 import com.identityos.onboarding_and_identity_service.dto.RegisterOrganizationResponse;
 import com.identityos.onboarding_and_identity_service.repository.OrganizationRepository;
 import com.identityos.onboarding_and_identity_service.service.HostedIdentityService;
+import com.identityos.onboarding_and_identity_service.service.OnboardingAuditService;
 import com.identityos.onboarding_and_identity_service.service.OrganizationRegistrationService;
 
 import java.util.List;
@@ -33,16 +34,19 @@ public class OnboardingController {
     private final HostedIdentityService hostedIdentityService;
     private final OrganizationRegistrationService organizationRegistrationService;
     private final OrganizationRepository organizationRepository;
+    private final OnboardingAuditService auditService;
 
     public OnboardingController(
             AuthenticationClient authenticationClient,
             HostedIdentityService hostedIdentityService,
             OrganizationRegistrationService organizationRegistrationService,
-            OrganizationRepository organizationRepository) {
+            OrganizationRepository organizationRepository,
+            OnboardingAuditService auditService) {
         this.authenticationClient = authenticationClient;
         this.hostedIdentityService = hostedIdentityService;
         this.organizationRegistrationService = organizationRegistrationService;
         this.organizationRepository = organizationRepository;
+        this.auditService = auditService;
     }
 
     @PostMapping("/identity/register")
@@ -100,21 +104,74 @@ public class OnboardingController {
     public ResponseEntity<Void> updateOrganizationApproval(
             @PathVariable String organizationId,
             @Valid @RequestBody ApprovalRequest request) {
-        organizationRepository.updateApprovalStatus(organizationId, request.decision());
-        return ResponseEntity.noContent().build();
+        try {
+            organizationRepository.updateApprovalStatus(organizationId, request.decision());
+            auditService.organizationApprovalUpdated(organizationId, request.decision());
+            return ResponseEntity.noContent().build();
+        } catch (RuntimeException exception) {
+            auditService.operationFailed(
+                    "ORGANIZATION_APPROVAL_UPDATE_FAILED",
+                    "POST",
+                    "/api/v1/onboarding/organizations/" + organizationId + "/approval",
+                    "ORGANIZATION",
+                    organizationId,
+                    "PLATFORM_ADMIN",
+                    organizationId,
+                    null,
+                    null,
+                    request.decision(),
+                    exception);
+            throw exception;
+        }
     }
 
     @PostMapping("/organizations/{organizationId}/admin-user")
     public ResponseEntity<OrganizationAdminSyncResponse> syncOrganizationAdmin(
             @PathVariable String organizationId) {
-        return ResponseEntity.ok(organizationRegistrationService.syncOrganizationAdmin(organizationId));
+        try {
+            OrganizationAdminSyncResponse response = organizationRegistrationService.syncOrganizationAdmin(organizationId);
+            auditService.organizationAdminSynced(response);
+            return ResponseEntity.ok(response);
+        } catch (RuntimeException exception) {
+            auditService.operationFailed(
+                    "ORGANIZATION_ADMIN_SYNC_FAILED",
+                    "POST",
+                    "/api/v1/onboarding/organizations/" + organizationId + "/admin-user",
+                    "ORGANIZATION",
+                    organizationId,
+                    "ORGANIZATION_ADMIN",
+                    organizationId,
+                    null,
+                    null,
+                    null,
+                    exception);
+            throw exception;
+        }
     }
 
     @PostMapping("/organizations/{organizationId}/applications")
     public ResponseEntity<ApplicationResponse> registerApplication(
             @PathVariable String organizationId,
             @Valid @RequestBody ApplicationRegistrationRequest request) {
-        return ResponseEntity.ok(organizationRepository.insertApplication(organizationId, request));
+        try {
+            ApplicationResponse response = organizationRepository.insertApplication(organizationId, request);
+            auditService.applicationRegistered(organizationId, request, response);
+            return ResponseEntity.ok(response);
+        } catch (RuntimeException exception) {
+            auditService.operationFailed(
+                    "APPLICATION_REGISTRATION_FAILED",
+                    "POST",
+                    "/api/v1/onboarding/organizations/" + organizationId + "/applications",
+                    "APPLICATION",
+                    null,
+                    "ORGANIZATION_ADMIN",
+                    organizationId,
+                    null,
+                    null,
+                    null,
+                    exception);
+            throw exception;
+        }
     }
 
     @GetMapping("/applications")
@@ -135,7 +192,25 @@ public class OnboardingController {
     public ResponseEntity<ApplicationResponse> updateApplicationApproval(
             @PathVariable String applicationId,
             @Valid @RequestBody ApprovalRequest request) {
-        return ResponseEntity.ok(organizationRepository.updateApplicationStatus(applicationId, request.decision()));
+        try {
+            ApplicationResponse response = organizationRepository.updateApplicationStatus(applicationId, request.decision());
+            auditService.applicationApprovalUpdated(request.decision(), response);
+            return ResponseEntity.ok(response);
+        } catch (RuntimeException exception) {
+            auditService.operationFailed(
+                    "APPLICATION_APPROVAL_UPDATE_FAILED",
+                    "POST",
+                    "/api/v1/onboarding/applications/" + applicationId + "/approval",
+                    "APPLICATION",
+                    applicationId,
+                    "PLATFORM_ADMIN",
+                    null,
+                    applicationId,
+                    null,
+                    request.decision(),
+                    exception);
+            throw exception;
+        }
     }
 
     @PostMapping("/organizations/{organizationId}/applications/{applicationId}/schemas")
@@ -143,7 +218,25 @@ public class OnboardingController {
             @PathVariable String organizationId,
             @PathVariable String applicationId,
             @Valid @RequestBody IdentitySchemaVersionRequest request) {
-        return ResponseEntity.ok(organizationRepository.createSchemaVersion(organizationId, applicationId, request));
+        try {
+            IdentitySchemaVersionResponse response = organizationRepository.createSchemaVersion(organizationId, applicationId, request);
+            auditService.schemaVersionCreated(organizationId, applicationId, request, response);
+            return ResponseEntity.ok(response);
+        } catch (RuntimeException exception) {
+            auditService.operationFailed(
+                    "SCHEMA_VERSION_CREATION_FAILED",
+                    "POST",
+                    "/api/v1/onboarding/organizations/" + organizationId + "/applications/" + applicationId + "/schemas",
+                    "IDENTITY_SCHEMA_VERSION",
+                    null,
+                    "ORGANIZATION_ADMIN",
+                    organizationId,
+                    applicationId,
+                    null,
+                    null,
+                    exception);
+            throw exception;
+        }
     }
 
     @GetMapping("/schemas")
@@ -164,8 +257,25 @@ public class OnboardingController {
     public ResponseEntity<Void> updateSchemaVersionApproval(
             @PathVariable String versionId,
             @Valid @RequestBody ApprovalRequest request) {
-        organizationRepository.updateSchemaVersionApproval(versionId, request.decision(), null);
-        return ResponseEntity.noContent().build();
+        try {
+            organizationRepository.updateSchemaVersionApproval(versionId, request.decision(), null);
+            auditService.schemaVersionApprovalUpdated(versionId, request.decision());
+            return ResponseEntity.noContent().build();
+        } catch (RuntimeException exception) {
+            auditService.operationFailed(
+                    "SCHEMA_VERSION_APPROVAL_UPDATE_FAILED",
+                    "POST",
+                    "/api/v1/onboarding/schemas/versions/" + versionId + "/approval",
+                    "IDENTITY_SCHEMA_VERSION",
+                    versionId,
+                    "PLATFORM_ADMIN",
+                    null,
+                    null,
+                    versionId,
+                    request.decision(),
+                    exception);
+            throw exception;
+        }
     }
 
     @PostMapping("/test-authentication")
@@ -173,9 +283,15 @@ public class OnboardingController {
         @RequestBody CreateIdentityRequest request,
         @RequestHeader("Authorization") String authorization) {
 
-    CreateIdentityResponse response =
-            authenticationClient.createIdentity(request, authorization);
+    try {
+        CreateIdentityResponse response =
+                authenticationClient.createIdentity(request, authorization);
+        auditService.authenticationTested(request, response);
 
-    return ResponseEntity.ok(response);
+        return ResponseEntity.ok(response);
+    } catch (RuntimeException exception) {
+        auditService.authenticationTestFailed(request, exception);
+        throw exception;
+    }
 }
 }

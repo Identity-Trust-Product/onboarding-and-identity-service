@@ -6,6 +6,8 @@ import com.identityos.onboarding_and_identity_service.dto.ApplicationResponse;
 import com.identityos.onboarding_and_identity_service.dto.HostedIdentityAuthResponse;
 import com.identityos.onboarding_and_identity_service.dto.HostedIdentityLoginRequest;
 import com.identityos.onboarding_and_identity_service.dto.HostedIdentityRegisterRequest;
+import com.identityos.onboarding_and_identity_service.dto.UserMigrationUserRequest;
+import com.identityos.onboarding_and_identity_service.repository.IdentityUserRepository;
 import com.identityos.onboarding_and_identity_service.repository.OrganizationRepository;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -18,14 +20,17 @@ import java.util.Map;
 @Service
 public class HostedIdentityService {
     private final OrganizationRepository organizationRepository;
+    private final IdentityUserRepository identityUserRepository;
     private final KeycloakAdminClient keycloakAdminClient;
     private final OnboardingAuditService auditService;
 
     public HostedIdentityService(
             OrganizationRepository organizationRepository,
+            IdentityUserRepository identityUserRepository,
             KeycloakAdminClient keycloakAdminClient,
             OnboardingAuditService auditService) {
         this.organizationRepository = organizationRepository;
+        this.identityUserRepository = identityUserRepository;
         this.keycloakAdminClient = keycloakAdminClient;
         this.auditService = auditService;
     }
@@ -64,6 +69,7 @@ public class HostedIdentityService {
                     null,
                     null,
                     null);
+            upsertIdentityUser(application, externalUsername, keycloakUsername, keycloakUserId, email, request.fields());
             auditService.hostedIdentityRegistered(
                     application.organizationId(),
                     application.applicationId(),
@@ -84,6 +90,7 @@ public class HostedIdentityService {
                     null,
                     null,
                     null);
+            upsertIdentityUser(application, externalUsername, keycloakUsername, null, email, request.fields());
             auditService.hostedIdentityRegistered(
                     application.organizationId(),
                     application.applicationId(),
@@ -102,6 +109,7 @@ public class HostedIdentityService {
                         null,
                         null,
                         null);
+                upsertIdentityUser(application, externalUsername, keycloakUsername, null, email, request.fields());
                 auditService.hostedIdentityRegistered(
                         application.organizationId(),
                         application.applicationId(),
@@ -215,6 +223,37 @@ public class HostedIdentityService {
     private boolean isAccountSetupError(RestClientResponseException exception) {
         String detail = exception.getResponseBodyAsString();
         return detail != null && detail.toLowerCase().contains("account is not fully set up");
+    }
+
+    private void upsertIdentityUser(
+            ApplicationResponse application,
+            String externalUsername,
+            String keycloakUsername,
+            String keycloakUserId,
+            String email,
+            Map<String, Object> fields) {
+        try {
+            UserMigrationUserRequest user = new UserMigrationUserRequest(
+                    null,
+                    externalUsername,
+                    email,
+                    stringValue(fields.get("mobile")),
+                    stringValue(fields.get("firstName")),
+                    stringValue(fields.get("lastName")),
+                    "APPLICATION_USER",
+                    "ACTIVE",
+                    null,
+                    fields);
+            java.util.UUID identityUserId = identityUserRepository.upsertIdentityUser(
+                    application,
+                    user,
+                    keycloakUsername,
+                    keycloakUserId,
+                    "SELF_REGISTRATION");
+            identityUserRepository.replaceAttributes(identityUserId, fields);
+        } catch (RuntimeException exception) {
+            System.err.println("Identity OS user table was not updated: " + exception.getMessage());
+        }
     }
 
     private String firstPresent(Map<String, Object> fields, String... keys) {

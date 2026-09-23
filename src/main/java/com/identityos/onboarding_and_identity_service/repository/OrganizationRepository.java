@@ -245,6 +245,79 @@ public class OrganizationRepository {
         return findApplicationByApplicationId(applicationId).orElseThrow();
     }
 
+    public ApplicationResponse ensureSelfHostedApplication(
+            String organizationId,
+            String applicationId,
+            String applicationName,
+            String applicationType,
+            String description,
+            String redirectUri) {
+        Optional<ApplicationResponse> existing = findApplicationByApplicationId(applicationId);
+        if (existing.isPresent()) {
+            jdbcTemplate.update("""
+                    UPDATE applications
+                    SET application_name = ?, application_type = ?, description = ?,
+                        redirect_uri = ?, status = 'ACTIVE', updated_at = CURRENT_TIMESTAMP
+                    WHERE application_id = ?
+                    """,
+                    applicationName,
+                    applicationType,
+                    description,
+                    redirectUri,
+                    applicationId);
+            ensureApplicationClient(applicationId);
+            return findApplicationByApplicationId(applicationId).orElseThrow();
+        }
+
+        UUID entityId = jdbcTemplate.queryForObject("""
+                INSERT INTO entities (entity_type, status)
+                VALUES ('APPLICATION', 'ACTIVE')
+                RETURNING id
+                """, UUID.class);
+        UUID organizationUuid = jdbcTemplate.queryForObject("""
+                SELECT id FROM organizations WHERE organization_id = ?
+                """, UUID.class, organizationId);
+
+        jdbcTemplate.update("""
+                INSERT INTO applications (
+                    entity_id, organization_id, application_id, application_name,
+                    application_type, description, redirect_uri, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE')
+                """,
+                entityId,
+                organizationUuid,
+                applicationId,
+                applicationName,
+                applicationType,
+                description,
+                redirectUri);
+        ensureApplicationClient(applicationId);
+        return findApplicationByApplicationId(applicationId).orElseThrow();
+    }
+
+    public void ensureApprovedSchemaVersion(
+            String organizationId,
+            String applicationId,
+            String schemaType,
+            String schemaName,
+            java.util.Map<String, Object> schemaJson,
+            java.util.Map<String, Object> configurationJson,
+            String changeSummary) {
+        if (findApprovedSchemaForClient(applicationId, schemaType).isPresent()) {
+            return;
+        }
+        createSchemaVersion(
+                organizationId,
+                applicationId,
+                new IdentitySchemaVersionRequest(
+                        schemaType,
+                        schemaName,
+                        schemaJson,
+                        configurationJson,
+                        changeSummary,
+                        true));
+    }
+
     public List<ApplicationResponse> findApplications(String organizationId) {
         if (organizationId == null || organizationId.isBlank()) {
             return jdbcTemplate.query("""

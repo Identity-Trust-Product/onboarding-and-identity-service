@@ -75,6 +75,44 @@ public class KeycloakAdminClient {
         }
     }
 
+    public void ensureApplicationSuperAdmin(
+            String adminUsername,
+            String displayName,
+            String email,
+            String password,
+            String organizationId,
+            String applicationId,
+            String clientId) {
+        String token = requestAdminToken();
+        String userId = findUserIdByUsername(token, adminUsername);
+        if (userId == null) {
+            userId = createSelfHostedAdminUser(
+                    token,
+                    adminUsername,
+                    displayName,
+                    email,
+                    password,
+                    organizationId,
+                    applicationId,
+                    clientId);
+        } else {
+            updateSelfHostedAdminUser(
+                    token,
+                    userId,
+                    adminUsername,
+                    displayName,
+                    email,
+                    organizationId,
+                    applicationId,
+                    clientId);
+            if (password != null && !password.isBlank()) {
+                resetApplicationUserPassword(token, userId, password);
+            }
+        }
+        assignRealmRole(token, userId, "APPLICATION_SUPER_ADMIN", "Self-hosted application administrator");
+        assignRealmRole(token, userId, "APPLICATION_USER", "End user registered through a third-party application");
+    }
+
     public String createApplicationUser(
             String keycloakUsername,
             String externalUsername,
@@ -113,6 +151,75 @@ public class KeycloakAdminClient {
         }
         joinGroup(token, userId, usersGroupId);
         assignApplicationUserRole(token, userId);
+        return userId;
+    }
+
+    public String createMigratedApplicationUser(
+            String keycloakUsername,
+            String externalUsername,
+            String password,
+            boolean temporaryPassword,
+            boolean sendPasswordSetupEmail,
+            String email,
+            String firstName,
+            String lastName,
+            String organizationId,
+            String applicationId,
+            String clientId,
+            String roleName,
+            Map<String, Object> submittedFields) {
+        String token = requestAdminToken();
+        String userId = findUserIdByUsername(token, keycloakUsername);
+        String usersGroupId = ensureGroupHierarchy(token, organizationId, applicationId);
+        Map<String, Object> fields = new LinkedHashMap<>();
+        if (submittedFields != null) {
+            fields.putAll(submittedFields);
+        }
+        putIfPresent(fields, "firstName", firstName);
+        putIfPresent(fields, "lastName", lastName);
+        if (userId == null) {
+            userId = createApplicationUserInKeycloak(
+                    token,
+                    keycloakUsername,
+                    externalUsername,
+                    password,
+                    temporaryPassword,
+                    sendPasswordSetupEmail,
+                    email,
+                    organizationId,
+                    applicationId,
+                    clientId,
+                    fields);
+        } else {
+            updateApplicationUserSetup(
+                    token,
+                    userId,
+                    keycloakUsername,
+                    externalUsername,
+                    email,
+                    organizationId,
+                    applicationId,
+                    clientId,
+                    fields,
+                    sendPasswordSetupEmail);
+            if (!sendPasswordSetupEmail && password != null && !password.isBlank()) {
+                resetApplicationUserPassword(token, userId, password, temporaryPassword);
+            }
+        }
+        joinGroup(token, userId, usersGroupId);
+        String normalizedRole = "APPLICATION_SUPER_ADMIN".equalsIgnoreCase(roleName)
+                ? "APPLICATION_SUPER_ADMIN"
+                : "APPLICATION_USER";
+        assignRealmRole(token, userId, normalizedRole, "Migrated Identity OS user");
+        if ("APPLICATION_SUPER_ADMIN".equals(normalizedRole)) {
+            assignApplicationUserRole(token, userId);
+        }
+        if (sendPasswordSetupEmail) {
+            if (email == null || email.isBlank()) {
+                throw new IllegalArgumentException("Email is required to send password setup link for migrated user.");
+            }
+            sendPasswordSetupEmail(token, userId);
+        }
         return userId;
     }
 
@@ -218,6 +325,91 @@ public class KeycloakAdminClient {
             throw new IllegalStateException("Keycloak did not return the created user location");
         }
         return location.substring(location.lastIndexOf('/') + 1);
+    }
+
+    private String createSelfHostedAdminUser(
+            String token,
+            String adminUsername,
+            String displayName,
+            String email,
+            String password,
+            String organizationId,
+            String applicationId,
+            String clientId) {
+        String[] nameParts = displayName.trim().isBlank()
+                ? new String[] {adminUsername}
+                : displayName.trim().split("\\s+", 2);
+        Map<String, Object> user = new LinkedHashMap<>();
+        user.put("username", adminUsername);
+        user.put("enabled", true);
+        user.put("emailVerified", true);
+        user.put("firstName", nameParts[0]);
+        user.put("lastName", nameParts.length > 1 ? nameParts[1] : "Admin");
+        if (email != null && !email.isBlank()) {
+            user.put("email", email);
+        }
+        user.put("attributes", Map.of(
+                "organization_id", List.of(organizationId),
+                "application_id", List.of(applicationId),
+                "client_id", List.of(clientId),
+                "external_username", List.of(adminUsername)));
+        user.put("requiredActions", List.of());
+        if (password != null && !password.isBlank()) {
+            user.put("credentials", List.of(Map.of(
+                    "type", "password",
+                    "value", password,
+                    "temporary", false)));
+        }
+
+        var response = restClient.post()
+                .uri("/admin/realms/" + targetRealm + "/users")
+                .headers(headers -> headers.setBearerAuth(token))
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(user)
+                .retrieve()
+                .toBodilessEntity();
+        String location = response.getHeaders().getFirst("Location");
+        if (location == null || location.isBlank()) {
+            throw new IllegalStateException("Keycloak did not return the created user location");
+        }
+        return location.substring(location.lastIndexOf('/') + 1);
+    }
+
+    private void updateSelfHostedAdminUser(
+            String token,
+            String userId,
+            String adminUsername,
+            String displayName,
+            String email,
+            String organizationId,
+            String applicationId,
+            String clientId) {
+        String[] nameParts = displayName.trim().isBlank()
+                ? new String[] {adminUsername}
+                : displayName.trim().split("\\s+", 2);
+        Map<String, Object> user = new LinkedHashMap<>();
+        user.put("username", adminUsername);
+        user.put("enabled", true);
+        user.put("emailVerified", true);
+        user.put("firstName", nameParts[0]);
+        user.put("lastName", nameParts.length > 1 ? nameParts[1] : "Admin");
+        if (email != null && !email.isBlank()) {
+            user.put("email", email);
+        }
+        user.put("attributes", Map.of(
+                "organization_id", List.of(organizationId),
+                "application_id", List.of(applicationId),
+                "client_id", List.of(clientId),
+                "external_username", List.of(adminUsername)));
+        user.put("requiredActions", List.of());
+
+        restClient.put()
+                .uri("/admin/realms/" + targetRealm + "/users/" + userId)
+                .headers(headers -> headers.setBearerAuth(token))
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(user)
+                .retrieve()
+                .toBodilessEntity();
     }
 
     private String findUserIdByUsername(String token, String username) {
@@ -350,11 +542,37 @@ public class KeycloakAdminClient {
             String applicationId,
             String clientId,
             Map<String, Object> submittedFields) {
+        return createApplicationUserInKeycloak(
+                token,
+                keycloakUsername,
+                externalUsername,
+                password,
+                false,
+                false,
+                email,
+                organizationId,
+                applicationId,
+                clientId,
+                submittedFields);
+    }
+
+    private String createApplicationUserInKeycloak(
+            String token,
+            String keycloakUsername,
+            String externalUsername,
+            String password,
+            boolean temporaryPassword,
+            boolean passwordSetupRequired,
+            String email,
+            String organizationId,
+            String applicationId,
+            String clientId,
+            Map<String, Object> submittedFields) {
         Map<String, Object> user = new LinkedHashMap<>();
         user.put("username", keycloakUsername);
         user.put("enabled", true);
         user.put("emailVerified", true);
-        user.put("requiredActions", List.of());
+        user.put("requiredActions", passwordSetupRequired ? List.of("UPDATE_PASSWORD") : List.of());
         if (email != null && !email.isBlank()) {
             user.put("email", email);
         }
@@ -367,10 +585,12 @@ public class KeycloakAdminClient {
                 "application_id", List.of(applicationId),
                 "client_id", List.of(clientId),
                 "external_username", List.of(externalUsername)));
-        user.put("credentials", List.of(Map.of(
-                "type", "password",
-                "value", password,
-                "temporary", false)));
+        if (password != null && !password.isBlank()) {
+            user.put("credentials", List.of(Map.of(
+                    "type", "password",
+                    "value", password,
+                    "temporary", temporaryPassword)));
+        }
 
         var response = restClient.post()
                 .uri("/admin/realms/" + targetRealm + "/users")
@@ -396,11 +616,35 @@ public class KeycloakAdminClient {
             String applicationId,
             String clientId,
             Map<String, Object> submittedFields) {
+        updateApplicationUserSetup(
+                token,
+                userId,
+                keycloakUsername,
+                externalUsername,
+                email,
+                organizationId,
+                applicationId,
+                clientId,
+                submittedFields,
+                false);
+    }
+
+    private void updateApplicationUserSetup(
+            String token,
+            String userId,
+            String keycloakUsername,
+            String externalUsername,
+            String email,
+            String organizationId,
+            String applicationId,
+            String clientId,
+            Map<String, Object> submittedFields,
+            boolean passwordSetupRequired) {
         Map<String, Object> user = new LinkedHashMap<>();
         user.put("username", keycloakUsername);
         user.put("enabled", true);
         user.put("emailVerified", true);
-        user.put("requiredActions", List.of());
+        user.put("requiredActions", passwordSetupRequired ? List.of("UPDATE_PASSWORD") : List.of());
         if (email != null && !email.isBlank()) {
             user.put("email", email);
         }
@@ -424,6 +668,10 @@ public class KeycloakAdminClient {
     }
 
     private void resetApplicationUserPassword(String token, String userId, String password) {
+        resetApplicationUserPassword(token, userId, password, false);
+    }
+
+    private void resetApplicationUserPassword(String token, String userId, String password, boolean temporaryPassword) {
         restClient.put()
                 .uri("/admin/realms/" + targetRealm + "/users/" + userId + "/reset-password")
                 .headers(headers -> headers.setBearerAuth(token))
@@ -431,7 +679,7 @@ public class KeycloakAdminClient {
                 .body(Map.of(
                         "type", "password",
                         "value", password,
-                        "temporary", false))
+                        "temporary", temporaryPassword))
                 .retrieve()
                 .toBodilessEntity();
     }
@@ -551,6 +799,10 @@ public class KeycloakAdminClient {
     }
 
     private void sendVerificationEmail(String token, String userId) {
+        sendPasswordSetupEmail(token, userId);
+    }
+
+    private void sendPasswordSetupEmail(String token, String userId) {
         restClient.put()
                 .uri("/admin/realms/" + targetRealm + "/users/" + userId + "/execute-actions-email")
                 .headers(headers -> headers.setBearerAuth(token))

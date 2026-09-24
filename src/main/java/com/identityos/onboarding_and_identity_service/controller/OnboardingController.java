@@ -12,6 +12,9 @@ import com.identityos.onboarding_and_identity_service.dto.CreateIdentityRequest;
 import com.identityos.onboarding_and_identity_service.dto.CreateIdentityResponse;
 import com.identityos.onboarding_and_identity_service.dto.HostedIdentityAuthResponse;
 import com.identityos.onboarding_and_identity_service.dto.HostedIdentityLoginRequest;
+import com.identityos.onboarding_and_identity_service.dto.HostedIdentityOtpRequest;
+import com.identityos.onboarding_and_identity_service.dto.HostedIdentityOtpResponse;
+import com.identityos.onboarding_and_identity_service.dto.HostedIdentityOtpVerifyRequest;
 import com.identityos.onboarding_and_identity_service.dto.HostedIdentityRegisterRequest;
 import com.identityos.onboarding_and_identity_service.dto.IdentitySchemaVersionRequest;
 import com.identityos.onboarding_and_identity_service.dto.IdentitySchemaVersionResponse;
@@ -23,6 +26,7 @@ import com.identityos.onboarding_and_identity_service.dto.UserMigrationRequest;
 import com.identityos.onboarding_and_identity_service.dto.UserMigrationResponse;
 import com.identityos.onboarding_and_identity_service.repository.OrganizationRepository;
 import com.identityos.onboarding_and_identity_service.service.HostedIdentityService;
+import com.identityos.onboarding_and_identity_service.service.HostedIdentityVerificationService;
 import com.identityos.onboarding_and_identity_service.service.IdentityUserMigrationService;
 import com.identityos.onboarding_and_identity_service.service.OnboardingAuditService;
 import com.identityos.onboarding_and_identity_service.service.OrganizationRegistrationService;
@@ -35,6 +39,7 @@ public class OnboardingController {
 
     private final AuthenticationClient authenticationClient;
     private final HostedIdentityService hostedIdentityService;
+    private final HostedIdentityVerificationService hostedIdentityVerificationService;
     private final IdentityUserMigrationService identityUserMigrationService;
     private final OrganizationRegistrationService organizationRegistrationService;
     private final OrganizationRepository organizationRepository;
@@ -43,12 +48,14 @@ public class OnboardingController {
     public OnboardingController(
             AuthenticationClient authenticationClient,
             HostedIdentityService hostedIdentityService,
+            HostedIdentityVerificationService hostedIdentityVerificationService,
             IdentityUserMigrationService identityUserMigrationService,
             OrganizationRegistrationService organizationRegistrationService,
             OrganizationRepository organizationRepository,
             OnboardingAuditService auditService) {
         this.authenticationClient = authenticationClient;
         this.hostedIdentityService = hostedIdentityService;
+        this.hostedIdentityVerificationService = hostedIdentityVerificationService;
         this.identityUserMigrationService = identityUserMigrationService;
         this.organizationRegistrationService = organizationRegistrationService;
         this.organizationRepository = organizationRepository;
@@ -65,6 +72,18 @@ public class OnboardingController {
     public ResponseEntity<HostedIdentityAuthResponse> loginHostedIdentity(
             @Valid @RequestBody HostedIdentityLoginRequest request) {
         return ResponseEntity.ok(hostedIdentityService.login(request));
+    }
+
+    @PostMapping("/identity/verification/otp/request")
+    public ResponseEntity<HostedIdentityOtpResponse> requestHostedIdentityOtp(
+            @Valid @RequestBody HostedIdentityOtpRequest request) {
+        return ResponseEntity.ok(hostedIdentityVerificationService.requestOtp(request));
+    }
+
+    @PostMapping("/identity/verification/otp/verify")
+    public ResponseEntity<HostedIdentityOtpResponse> verifyHostedIdentityOtp(
+            @Valid @RequestBody HostedIdentityOtpVerifyRequest request) {
+        return ResponseEntity.ok(hostedIdentityVerificationService.verifyOtp(request));
     }
 
     @PostMapping("/identity-users/migrate")

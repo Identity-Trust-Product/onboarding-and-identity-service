@@ -8,6 +8,7 @@ import java.util.Map;
 public record HostedIdentityRegisterRequest(
         @NotBlank String clientId,
         String redirectUri,
-        @NotNull Map<String, Object> fields
+        @NotNull Map<String, Object> fields,
+        Map<String, Object> verificationStatus
 ) {
 }

@@ -6,6 +6,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.UUID;
 
 @Repository
@@ -90,17 +92,51 @@ public class IdentityUserRepository {
         if (attributes == null || attributes.isEmpty()) {
             return;
         }
+        Set<String> columns = identityUserAttributeColumns();
+        if (columns.isEmpty()) {
+            throw new IllegalStateException("identity_user_attributes table was not found.");
+        }
+        String valueColumn = columns.contains("attribute_value") ? "attribute_value" : columns.contains("value") ? "value" : null;
+        String sensitiveColumn = columns.contains("sensitive") ? "sensitive" : columns.contains("is_sensitive") ? "is_sensitive" : null;
+        if (valueColumn == null) {
+            throw new IllegalStateException("identity_user_attributes table must have attribute_value or value column.");
+        }
         jdbcTemplate.update("DELETE FROM identity_user_attributes WHERE identity_user_id = ?", identityUserId);
         attributes.forEach((name, value) -> {
             if (name == null || name.isBlank() || value == null) {
                 return;
             }
-            jdbcTemplate.update("""
-                    INSERT INTO identity_user_attributes (
-                        identity_user_id, attribute_name, attribute_value, sensitive
-                    ) VALUES (?, ?, ?, ?)
-                    """, identityUserId, name, String.valueOf(value), isSensitiveAttribute(name));
+            String cleanName = name.trim();
+            String stringValue = String.valueOf(value);
+            if (stringValue.isBlank()) {
+                return;
+            }
+            if (sensitiveColumn == null) {
+                jdbcTemplate.update("""
+                        INSERT INTO identity_user_attributes (
+                            identity_user_id, attribute_name, %s
+                        ) VALUES (?, ?, ?)
+                        """.formatted(valueColumn), identityUserId, cleanName, stringValue);
+            } else {
+                jdbcTemplate.update("""
+                        INSERT INTO identity_user_attributes (
+                            identity_user_id, attribute_name, %s, %s
+                        ) VALUES (?, ?, ?, ?)
+                        """.formatted(valueColumn, sensitiveColumn), identityUserId, cleanName, stringValue, isSensitiveAttribute(cleanName));
+            }
         });
+    }
+
+    private Set<String> identityUserAttributeColumns() {
+        return jdbcTemplate.queryForList("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'identity_user_attributes'
+                """, String.class)
+                .stream()
+                .map(String::toLowerCase)
+                .collect(Collectors.toSet());
     }
 
     private boolean isSensitiveAttribute(String name) {

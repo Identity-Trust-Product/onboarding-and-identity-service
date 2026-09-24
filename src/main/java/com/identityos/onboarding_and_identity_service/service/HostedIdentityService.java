@@ -69,7 +69,7 @@ public class HostedIdentityService {
                     null,
                     null,
                     null);
-            upsertIdentityUser(application, externalUsername, keycloakUsername, keycloakUserId, email, request.fields());
+            upsertIdentityUser(application, externalUsername, keycloakUsername, keycloakUserId, email, request.fields(), request.verificationStatus());
             auditService.hostedIdentityRegistered(
                     application.organizationId(),
                     application.applicationId(),
@@ -90,7 +90,7 @@ public class HostedIdentityService {
                     null,
                     null,
                     null);
-            upsertIdentityUser(application, externalUsername, keycloakUsername, null, email, request.fields());
+            upsertIdentityUser(application, externalUsername, keycloakUsername, null, email, request.fields(), request.verificationStatus());
             auditService.hostedIdentityRegistered(
                     application.organizationId(),
                     application.applicationId(),
@@ -109,7 +109,7 @@ public class HostedIdentityService {
                         null,
                         null,
                         null);
-                upsertIdentityUser(application, externalUsername, keycloakUsername, null, email, request.fields());
+                upsertIdentityUser(application, externalUsername, keycloakUsername, null, email, request.fields(), request.verificationStatus());
                 auditService.hostedIdentityRegistered(
                         application.organizationId(),
                         application.applicationId(),
@@ -231,8 +231,11 @@ public class HostedIdentityService {
             String keycloakUsername,
             String keycloakUserId,
             String email,
-            Map<String, Object> fields) {
+            Map<String, Object> fields,
+            Map<String, Object> verificationStatus) {
         try {
+            Map<String, Object> attributes = new java.util.LinkedHashMap<>(fields);
+            addVerificationAttributes(attributes, verificationStatus);
             UserMigrationUserRequest user = new UserMigrationUserRequest(
                     null,
                     externalUsername,
@@ -243,17 +246,51 @@ public class HostedIdentityService {
                     "APPLICATION_USER",
                     "ACTIVE",
                     null,
-                    fields);
+                    attributes);
             java.util.UUID identityUserId = identityUserRepository.upsertIdentityUser(
                     application,
                     user,
                     keycloakUsername,
                     keycloakUserId,
                     "SELF_REGISTRATION");
-            identityUserRepository.replaceAttributes(identityUserId, fields);
+            identityUserRepository.replaceAttributes(identityUserId, attributes);
         } catch (RuntimeException exception) {
             System.err.println("Identity OS user table was not updated: " + exception.getMessage());
+            throw exception;
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void addVerificationAttributes(Map<String, Object> attributes, Map<String, Object> verificationStatus) {
+        if (verificationStatus == null || verificationStatus.isEmpty()) {
+            return;
+        }
+        verificationStatus.forEach((fieldName, value) -> {
+            String normalizedFieldName = fieldName == null ? "" : fieldName.trim().toLowerCase().replaceAll("[^a-z0-9]+", "_");
+            if (normalizedFieldName.isBlank()) {
+                return;
+            }
+            boolean verified = false;
+            String method = "";
+            String verifiedAt = "";
+            if (value instanceof Map<?, ?> statusMap) {
+                Object verifiedValue = statusMap.get("verified");
+                verified = Boolean.TRUE.equals(verifiedValue) || "true".equalsIgnoreCase(String.valueOf(verifiedValue));
+                Object methodValue = statusMap.get("method");
+                Object verifiedAtValue = statusMap.get("verifiedAt");
+                method = methodValue == null ? "" : String.valueOf(methodValue);
+                verifiedAt = verifiedAtValue == null ? "" : String.valueOf(verifiedAtValue);
+            } else {
+                verified = Boolean.TRUE.equals(value) || "true".equalsIgnoreCase(String.valueOf(value));
+            }
+            attributes.put(normalizedFieldName + "_verified", String.valueOf(verified));
+            if (!method.isBlank()) {
+                attributes.put(normalizedFieldName + "_verification_method", method);
+            }
+            if (!verifiedAt.isBlank()) {
+                attributes.put(normalizedFieldName + "_verified_at", verifiedAt);
+            }
+        });
     }
 
     private String firstPresent(Map<String, Object> fields, String... keys) {

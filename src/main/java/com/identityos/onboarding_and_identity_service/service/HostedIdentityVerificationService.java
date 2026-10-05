@@ -3,6 +3,7 @@ package com.identityos.onboarding_and_identity_service.service;
 import com.identityos.onboarding_and_identity_service.dto.HostedIdentityOtpRequest;
 import com.identityos.onboarding_and_identity_service.dto.HostedIdentityOtpResponse;
 import com.identityos.onboarding_and_identity_service.dto.HostedIdentityOtpVerifyRequest;
+import com.identityos.onboarding_and_identity_service.client.trust.TrustSignalClient;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.mail.SimpleMailMessage;
 import org.springframework.mail.javamail.JavaMailSender;
@@ -24,6 +25,7 @@ public class HostedIdentityVerificationService {
     private static final String DUMMY_AADHAAR_OTP = "123456";
 
     private final JavaMailSender mailSender;
+    private final TrustSignalClient trustSignalClient;
     private final String mailFrom;
     private final SecureRandom secureRandom = new SecureRandom();
     private final Map<String, OtpEntry> otpStore = new ConcurrentHashMap<>();
@@ -32,8 +34,10 @@ public class HostedIdentityVerificationService {
 
     public HostedIdentityVerificationService(
             JavaMailSender mailSender,
+            TrustSignalClient trustSignalClient,
             @Value("${organization-registration.mail.from}") String mailFrom) {
         this.mailSender = mailSender;
+        this.trustSignalClient = trustSignalClient;
         this.mailFrom = mailFrom;
     }
 
@@ -47,6 +51,7 @@ public class HostedIdentityVerificationService {
             String verificationId = verificationIdFor(key, entry);
             String otp = entry.otp();
             otpStore.put(key, entry);
+            recordOtpSignal(request, "OTP_REQUESTED", "SUCCESS");
             if (shouldSendEmail(key)) {
                 sendEmailOtp(request.value(), otp);
                 return new HostedIdentityOtpResponse(true, "Email OTP sent.", false, verificationId);
@@ -57,11 +62,13 @@ public class HostedIdentityVerificationService {
         if (isAadhaar(fieldType) || isAadhaar(fieldName)) {
             OtpEntry entry = reusableOtp(key, false);
             String verificationId = verificationIdFor(key, entry);
+            recordOtpSignal(request, "OTP_REQUESTED", "SUCCESS");
             return new HostedIdentityOtpResponse(true, "Aadhaar dummy OTP generated. Use 123456.", false, verificationId);
         }
 
         OtpEntry entry = reusableOtp(key, false);
         String verificationId = verificationIdFor(key, entry);
+        recordOtpSignal(request, "OTP_REQUESTED", "SUCCESS");
         return new HostedIdentityOtpResponse(true, "Dummy OTP generated. Use 123456.", false, verificationId);
     }
 
@@ -71,23 +78,67 @@ public class HostedIdentityVerificationService {
         if (entry == null) {
             if (isValidDeterministicOtp(key, request.otp())) {
                 removeVerificationId(request.verificationId());
+                recordVerificationSignal(request, true);
                 return new HostedIdentityOtpResponse(true, "Verification completed.", true, request.verificationId());
             }
+            recordVerificationSignal(request, false);
             return new HostedIdentityOtpResponse(false, "Generate OTP again.", false, request.verificationId());
         }
         if (entry.expiresAt().isBefore(Instant.now())) {
             otpStore.remove(key);
             removeVerificationId(request.verificationId());
+            recordVerificationSignal(request, false);
             return new HostedIdentityOtpResponse(false, "OTP expired. Generate OTP again.", false, request.verificationId());
         }
         if (!entry.otp().equals(request.otp())) {
             if (!isValidDeterministicOtp(key, request.otp())) {
+                recordVerificationSignal(request, false);
                 return new HostedIdentityOtpResponse(false, "Invalid OTP.", false, request.verificationId());
             }
         }
         otpStore.remove(key);
         removeVerificationId(request.verificationId());
+        recordVerificationSignal(request, true);
         return new HostedIdentityOtpResponse(true, "Verification completed.", true, request.verificationId());
+    }
+
+    private void recordOtpSignal(HostedIdentityOtpRequest request, String signalType, String outcome) {
+        trustSignalClient.record(
+                normalize(request.value()),
+                null,
+                request.clientId(),
+                signalType,
+                outcome,
+                Map.of(
+                        "fieldName", request.fieldName(),
+                        "fieldType", request.fieldType()));
+    }
+
+    private void recordVerificationSignal(HostedIdentityOtpVerifyRequest request, boolean verified) {
+        String canonicalFieldName = canonicalFieldName(request.fieldName(), request.fieldName());
+        trustSignalClient.record(
+                normalize(request.value()),
+                null,
+                request.clientId(),
+                verified ? "OTP_VERIFIED" : "OTP_FAILED",
+                verified ? "SUCCESS" : "FAILED",
+                Map.of("fieldName", request.fieldName()));
+        if (!verified) {
+            return;
+        }
+        String signalType = switch (canonicalFieldName) {
+            case "email" -> "EMAIL_VERIFIED";
+            case "mobile" -> "MOBILE_VERIFIED";
+            case "aadhaar" -> "AADHAAR_VERIFIED";
+            default -> "IDENTITY_FIELD_VERIFIED";
+        };
+        trustSignalClient.record(
+                normalize(request.value()),
+                null,
+                request.clientId(),
+                signalType,
+                "SUCCESS",
+                Map.of("fieldName", request.fieldName()));
     }
 
     private void sendEmailOtp(String email, String otp) {

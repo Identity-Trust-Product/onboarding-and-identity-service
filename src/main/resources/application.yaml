@@ -33,6 +33,8 @@ services:
     url: http://localhost:8082
   audit:
     url: ${AUDIT_SERVICE_URL:http://localhost:8086}
+  trust:
+    url: ${TRUST_SERVICE_URL:http://localhost:8087}
 
 keycloak:
   admin:

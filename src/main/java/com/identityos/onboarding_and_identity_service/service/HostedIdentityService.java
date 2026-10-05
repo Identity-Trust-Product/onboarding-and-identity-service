@@ -1,11 +1,15 @@
 package com.identityos.onboarding_and_identity_service.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.identityos.onboarding_and_identity_service.client.trust.TrustSignalClient;
 import com.identityos.onboarding_and_identity_service.client.KeycloakAdminClient;
 import com.identityos.onboarding_and_identity_service.dto.ApplicationResponse;
 import com.identityos.onboarding_and_identity_service.dto.HostedIdentityAuthResponse;
 import com.identityos.onboarding_and_identity_service.dto.HostedIdentityLoginRequest;
+import com.identityos.onboarding_and_identity_service.dto.HostedIdentityProfileCompleteRequest;
+import com.identityos.onboarding_and_identity_service.dto.HostedIdentityProfileResponse;
 import com.identityos.onboarding_and_identity_service.dto.HostedIdentityRegisterRequest;
+import com.identityos.onboarding_and_identity_service.dto.IdentityUserResponse;
 import com.identityos.onboarding_and_identity_service.dto.UserMigrationUserRequest;
 import com.identityos.onboarding_and_identity_service.repository.IdentityUserRepository;
 import com.identityos.onboarding_and_identity_service.repository.OrganizationRepository;
@@ -15,6 +19,7 @@ import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClientResponseException;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 @Service
@@ -23,16 +28,19 @@ public class HostedIdentityService {
     private final IdentityUserRepository identityUserRepository;
     private final KeycloakAdminClient keycloakAdminClient;
     private final OnboardingAuditService auditService;
+    private final TrustSignalClient trustSignalClient;
 
     public HostedIdentityService(
             OrganizationRepository organizationRepository,
             IdentityUserRepository identityUserRepository,
             KeycloakAdminClient keycloakAdminClient,
-            OnboardingAuditService auditService) {
+            OnboardingAuditService auditService,
+            TrustSignalClient trustSignalClient) {
         this.organizationRepository = organizationRepository;
         this.identityUserRepository = identityUserRepository;
         this.keycloakAdminClient = keycloakAdminClient;
         this.auditService = auditService;
+        this.trustSignalClient = trustSignalClient;
     }
 
     public HostedIdentityAuthResponse register(HostedIdentityRegisterRequest request) {
@@ -69,13 +77,14 @@ public class HostedIdentityService {
                     null,
                     null,
                     null);
-            upsertIdentityUser(application, externalUsername, keycloakUsername, keycloakUserId, email, request.fields(), request.verificationStatus());
+            upsertIdentityUser(application, externalUsername, keycloakUsername, keycloakUserId, email, request.fields(), request.verificationStatus(), "SELF_REGISTRATION");
             auditService.hostedIdentityRegistered(
                     application.organizationId(),
                     application.applicationId(),
                     request.clientId(),
                     externalUsername,
                     response);
+            recordRegistrationSignals(application, externalUsername, request.verificationStatus());
             return response;
         } catch (IllegalStateException exception) {
             if (!exception.getMessage().toLowerCase().contains("already registered")) {
@@ -90,13 +99,14 @@ public class HostedIdentityService {
                     null,
                     null,
                     null);
-            upsertIdentityUser(application, externalUsername, keycloakUsername, null, email, request.fields(), request.verificationStatus());
+            upsertIdentityUser(application, externalUsername, keycloakUsername, null, email, request.fields(), request.verificationStatus(), "SELF_REGISTRATION");
             auditService.hostedIdentityRegistered(
                     application.organizationId(),
                     application.applicationId(),
                     request.clientId(),
                     externalUsername,
                     response);
+            recordRegistrationSignals(application, externalUsername, request.verificationStatus());
             return response;
         } catch (RestClientResponseException exception) {
             if (exception.getStatusCode().value() == 409) {
@@ -109,13 +119,14 @@ public class HostedIdentityService {
                         null,
                         null,
                         null);
-                upsertIdentityUser(application, externalUsername, keycloakUsername, null, email, request.fields(), request.verificationStatus());
+                upsertIdentityUser(application, externalUsername, keycloakUsername, null, email, request.fields(), request.verificationStatus(), "SELF_REGISTRATION");
                 auditService.hostedIdentityRegistered(
                         application.organizationId(),
                         application.applicationId(),
                         request.clientId(),
                         externalUsername,
                         response);
+                recordRegistrationSignals(application, externalUsername, request.verificationStatus());
                 return response;
             }
             String detail = exception.getResponseBodyAsString();
@@ -143,12 +154,14 @@ public class HostedIdentityService {
         try {
             token = authenticateApplicationUser(application.applicationId(), externalUsername, password);
         } catch (HttpClientErrorException.Unauthorized exception) {
+            recordLoginSignal(application, externalUsername, "LOGIN_FAILED", "FAILED", Map.of("reason", "unauthorized"));
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid username or password.", exception);
         } catch (HttpClientErrorException.BadRequest exception) {
             String detail = exception.getResponseBodyAsString();
             String message = detail == null || detail.isBlank()
                     ? "Invalid username or password."
                     : "Unable to login through Keycloak: " + detail;
+            recordLoginSignal(application, externalUsername, "LOGIN_FAILED", "FAILED", Map.of("reason", message));
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, message, exception);
         }
         HostedIdentityAuthResponse response = new HostedIdentityAuthResponse(
@@ -166,7 +179,124 @@ public class HostedIdentityService {
                 request.clientId(),
                 externalUsername,
                 response);
+        recordLoginSignal(application, externalUsername, "LOGIN_SUCCESS", "SUCCESS", Map.of("tokenType", response.tokenType()));
         return response;
+    }
+
+    public HostedIdentityProfileResponse profile(String clientId, String username) {
+        ApplicationResponse application = approvedApplication(clientId, null);
+        String externalUsername = externalUsername(application.applicationId(), username);
+        IdentityUserResponse user = identityUserRepository.findByApplicationAndUsername(application.applicationId(), externalUsername)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Identity profile was not found."));
+        Map<String, Object> attributes = new LinkedHashMap<>(identityUserRepository.findAttributes(user.id()));
+        Map<String, Object> fields = new LinkedHashMap<>(attributes);
+        fields.put("username", user.username());
+        if (user.email() != null && !user.email().isBlank()) fields.put("email", user.email());
+        if (user.mobileNumber() != null && !user.mobileNumber().isBlank()) fields.put("mobile", user.mobileNumber());
+        if (user.firstName() != null && !user.firstName().isBlank()) fields.put("firstName", user.firstName());
+        if (user.lastName() != null && !user.lastName().isBlank()) fields.put("lastName", user.lastName());
+
+        Map<String, Object> verificationStatus = new LinkedHashMap<>();
+        verificationStatus.put("email", Map.of("verified", Boolean.TRUE.equals(user.emailVerified())));
+        verificationStatus.put("mobile", Map.of("verified", Boolean.TRUE.equals(user.mobileVerified())));
+        attributes.forEach((key, value) -> {
+            if (key != null && key.endsWith("_verified")) {
+                String fieldName = key.substring(0, key.length() - "_verified".length());
+                verificationStatus.put(fieldName, Map.of("verified", "true".equalsIgnoreCase(String.valueOf(value))));
+            }
+        });
+
+        return new HostedIdentityProfileResponse(
+                clientId,
+                application.organizationId(),
+                application.applicationId(),
+                application.applicationName(),
+                user.username(),
+                fields,
+                verificationStatus);
+    }
+
+    public HostedIdentityProfileResponse completeProfile(HostedIdentityProfileCompleteRequest request) {
+        ApplicationResponse application = approvedApplication(request.clientId(), null);
+        String externalUsername = externalUsername(application.applicationId(), request.username());
+        Map<String, Object> fields = new LinkedHashMap<>(request.fields());
+        fields.put("username", externalUsername);
+        String keycloakUsername = keycloakUsername(application.applicationId(), externalUsername);
+        String email = stringValue(fields.get("email"));
+        upsertIdentityUser(application, externalUsername, keycloakUsername, null, email, fields, request.verificationStatus(), "PROFILE_COMPLETION");
+        trustSignalClient.record(
+                externalUsername,
+                application.organizationId(),
+                application.applicationId(),
+                "PROFILE_COMPLETED",
+                "SUCCESS",
+                Map.of("source", "profile-completion"));
+        recordRegistrationSignals(application, externalUsername, request.verificationStatus());
+        return profile(request.clientId(), externalUsername);
+    }
+
+    private void recordRegistrationSignals(
+            ApplicationResponse application,
+            String externalUsername,
+            Map<String, Object> verificationStatus) {
+        trustSignalClient.record(
+                externalUsername,
+                application.organizationId(),
+                application.applicationId(),
+                "IDENTITY_REGISTERED",
+                "SUCCESS",
+                Map.of("source", "self-registration"));
+        if (verificationStatus == null || verificationStatus.isEmpty()) {
+            return;
+        }
+        verificationStatus.forEach((fieldName, value) -> {
+            if (!isVerified(value)) {
+                return;
+            }
+            String normalized = fieldName == null ? "" : fieldName.trim().toLowerCase();
+            String signalType;
+            if (normalized.contains("email")) {
+                signalType = "EMAIL_VERIFIED";
+            } else if (normalized.contains("mobile") || normalized.contains("phone")) {
+                signalType = "MOBILE_VERIFIED";
+            } else if (normalized.contains("aadhaar") || normalized.contains("aadhar")) {
+                signalType = "AADHAAR_VERIFIED";
+            } else if (normalized.contains("pan")) {
+                signalType = "PAN_VERIFIED";
+            } else {
+                signalType = "IDENTITY_FIELD_VERIFIED";
+            }
+            trustSignalClient.record(
+                    externalUsername,
+                    application.organizationId(),
+                    application.applicationId(),
+                    signalType,
+                    "SUCCESS",
+                    Map.of("fieldName", fieldName == null ? "unknown" : fieldName));
+        });
+    }
+
+    private void recordLoginSignal(
+            ApplicationResponse application,
+            String externalUsername,
+            String signalType,
+            String outcome,
+            Map<String, Object> metadata) {
+        trustSignalClient.record(
+                externalUsername,
+                application.organizationId(),
+                application.applicationId(),
+                signalType,
+                outcome,
+                metadata);
+    }
+
+    private boolean isVerified(Object value) {
+        if (value instanceof Map<?, ?> statusMap) {
+            Object verifiedValue = statusMap.get("verified");
+            return Boolean.TRUE.equals(verifiedValue) || "true".equalsIgnoreCase(String.valueOf(verifiedValue));
+        }
+        return Boolean.TRUE.equals(value) || "true".equalsIgnoreCase(String.valueOf(value));
     }
 
     private ApplicationResponse approvedApplication(String clientId, String redirectUri) {
@@ -232,7 +362,8 @@ public class HostedIdentityService {
             String keycloakUserId,
             String email,
             Map<String, Object> fields,
-            Map<String, Object> verificationStatus) {
+            Map<String, Object> verificationStatus,
+            String source) {
         try {
             Map<String, Object> attributes = new java.util.LinkedHashMap<>(fields);
             addVerificationAttributes(attributes, verificationStatus);
@@ -252,7 +383,7 @@ public class HostedIdentityService {
                     user,
                     keycloakUsername,
                     keycloakUserId,
-                    "SELF_REGISTRATION");
+                    source);
             identityUserRepository.replaceAttributes(identityUserId, attributes);
         } catch (RuntimeException exception) {
             System.err.println("Identity OS user table was not updated: " + exception.getMessage());

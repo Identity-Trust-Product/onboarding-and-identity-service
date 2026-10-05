@@ -1,11 +1,17 @@
 package com.identityos.onboarding_and_identity_service.repository;
 
 import com.identityos.onboarding_and_identity_service.dto.ApplicationResponse;
+import com.identityos.onboarding_and_identity_service.dto.IdentityUserResponse;
 import com.identityos.onboarding_and_identity_service.dto.UserMigrationUserRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import java.sql.Timestamp;
+import java.time.LocalDateTime;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.UUID;
@@ -63,7 +69,9 @@ public class IdentityUserRepository {
                     keycloak_username = EXCLUDED.keycloak_username,
                     keycloak_user_id = COALESCE(EXCLUDED.keycloak_user_id, identity_users.keycloak_user_id),
                     email = EXCLUDED.email,
+                    email_verified = EXCLUDED.email_verified,
                     mobile_number = EXCLUDED.mobile_number,
+                    mobile_verified = EXCLUDED.mobile_verified,
                     first_name = EXCLUDED.first_name,
                     last_name = EXCLUDED.last_name,
                     status = EXCLUDED.status,
@@ -127,6 +135,110 @@ public class IdentityUserRepository {
         });
     }
 
+    public List<IdentityUserResponse> findByOrganizationId(String organizationId) {
+        return jdbcTemplate.query("""
+                SELECT iu.id,
+                       iu.application_public_id,
+                       a.application_name,
+                       iu.external_user_id,
+                       iu.username,
+                       iu.email,
+                       iu.email_verified,
+                       iu.mobile_number,
+                       iu.mobile_verified,
+                       iu.first_name,
+                       iu.last_name,
+                       iu.status,
+                       iu.source,
+                       iu.created_at,
+                       iu.updated_at
+                FROM identity_users iu
+                JOIN applications a ON a.application_id = iu.application_public_id
+                JOIN organizations o ON o.id = a.organization_id
+                WHERE o.organization_id = ?
+                ORDER BY iu.created_at DESC
+                """, (resultSet, rowNum) -> new IdentityUserResponse(
+                        (UUID) resultSet.getObject("id"),
+                        resultSet.getString("application_public_id"),
+                        resultSet.getString("application_name"),
+                        resultSet.getString("external_user_id"),
+                        resultSet.getString("username"),
+                        resultSet.getString("email"),
+                        resultSet.getBoolean("email_verified"),
+                        resultSet.getString("mobile_number"),
+                        resultSet.getBoolean("mobile_verified"),
+                        resultSet.getString("first_name"),
+                        resultSet.getString("last_name"),
+                        resultSet.getString("status"),
+                        resultSet.getString("source"),
+                        toLocalDateTime(resultSet.getTimestamp("created_at")),
+                        toLocalDateTime(resultSet.getTimestamp("updated_at"))),
+                organizationId);
+    }
+
+    public Optional<IdentityUserResponse> findByApplicationAndUsername(String applicationPublicId, String username) {
+        return jdbcTemplate.query("""
+                SELECT iu.id,
+                       iu.application_public_id,
+                       a.application_name,
+                       iu.external_user_id,
+                       iu.username,
+                       iu.email,
+                       iu.email_verified,
+                       iu.mobile_number,
+                       iu.mobile_verified,
+                       iu.first_name,
+                       iu.last_name,
+                       iu.status,
+                       iu.source,
+                       iu.created_at,
+                       iu.updated_at
+                FROM identity_users iu
+                JOIN applications a ON a.application_id = iu.application_public_id
+                WHERE iu.application_public_id = ?
+                  AND LOWER(iu.username) = LOWER(?)
+                """, resultSet -> resultSet.next()
+                        ? Optional.of(new IdentityUserResponse(
+                        (UUID) resultSet.getObject("id"),
+                        resultSet.getString("application_public_id"),
+                        resultSet.getString("application_name"),
+                        resultSet.getString("external_user_id"),
+                        resultSet.getString("username"),
+                        resultSet.getString("email"),
+                        resultSet.getBoolean("email_verified"),
+                        resultSet.getString("mobile_number"),
+                        resultSet.getBoolean("mobile_verified"),
+                        resultSet.getString("first_name"),
+                        resultSet.getString("last_name"),
+                        resultSet.getString("status"),
+                        resultSet.getString("source"),
+                        toLocalDateTime(resultSet.getTimestamp("created_at")),
+                        toLocalDateTime(resultSet.getTimestamp("updated_at"))))
+                        : Optional.empty(),
+                applicationPublicId,
+                username);
+    }
+
+    public Map<String, Object> findAttributes(UUID identityUserId) {
+        Set<String> columns = identityUserAttributeColumns();
+        if (columns.isEmpty()) {
+            return Map.of();
+        }
+        String valueColumn = columns.contains("attribute_value") ? "attribute_value" : columns.contains("value") ? "value" : null;
+        if (valueColumn == null) {
+            return Map.of();
+        }
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        jdbcTemplate.query("""
+                SELECT attribute_name, %s AS attribute_value
+                FROM identity_user_attributes
+                WHERE identity_user_id = ?
+                """.formatted(valueColumn), resultSet -> {
+                    attributes.put(resultSet.getString("attribute_name"), resultSet.getString("attribute_value"));
+                }, identityUserId);
+        return attributes;
+    }
+
     private Set<String> identityUserAttributeColumns() {
         return jdbcTemplate.queryForList("""
                 SELECT column_name
@@ -165,5 +277,9 @@ public class IdentityUserRepository {
 
     private String blankToNull(String value) {
         return value == null || value.isBlank() ? null : value.trim();
+    }
+
+    private LocalDateTime toLocalDateTime(Timestamp timestamp) {
+        return timestamp == null ? null : timestamp.toLocalDateTime();
     }
 }
